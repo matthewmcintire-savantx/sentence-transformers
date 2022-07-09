@@ -20,7 +20,13 @@ class Transformer(nn.Module):
     def __init__(self, model_name_or_path: str, max_seq_length: Optional[int] = None,
                  model_args: Dict = {}, cache_dir: Optional[str] = None,
                  tokenizer_args: Dict = {}, do_lower_case: bool = False,
-                 tokenizer_name_or_path : str = None):
+                 tokenizer_name_or_path : str = None,
+                 bos_spec_token_q=None, eos_spec_token_q=None, 
+                 bos_spec_token_d=None, eos_spec_token_d=None,
+                 replace_bos=False,
+                 bos_spec_token_q_rep=None,
+                 bos_spec_token_d_rep=None,
+                 ):
         super(Transformer, self).__init__()
         self.config_keys = ['max_seq_length', 'do_lower_case']
         self.do_lower_case = do_lower_case
@@ -36,6 +42,18 @@ class Transformer(nn.Module):
                 max_seq_length = min(self.auto_model.config.max_position_embeddings, self.tokenizer.model_max_length)
 
         self.max_seq_length = max_seq_length
+
+        print("Using Maximum Sequence Length: ", self.max_seq_length)
+
+        # Set these in the script if needed
+        self.bos_spec_token_q = bos_spec_token_q
+        self.eos_spec_token_q = eos_spec_token_q
+        self.bos_spec_token_d = bos_spec_token_d
+        self.eos_spec_token_d = eos_spec_token_d
+
+        self.replace_bos = replace_bos
+        self.bos_spec_token_q_rep = bos_spec_token_q_rep
+        self.bos_spec_token_d_rep = bos_spec_token_d_rep
 
         if tokenizer_name_or_path is not None:
             self.auto_model.config.tokenizer_class = self.tokenizer.__class__.__name__
@@ -110,9 +128,41 @@ class Transformer(nn.Module):
         if self.do_lower_case:
             to_tokenize = [[s.lower() for s in col] for col in to_tokenize]
 
-        output.update(self.tokenizer(*to_tokenize, padding=True, truncation='longest_first', return_tensors="pt", max_length=self.max_seq_length))
+        # Transfomers never adds special tokens for GPT models - https://github.com/huggingface/transformers/issues/3311
+        # hence we add them manually here:
+        if (self.bos_spec_token_q is not None) and \
+           (self.eos_spec_token_q is not None) and \
+           (self.bos_spec_token_d is not None) and \
+           (self.eos_spec_token_d is not None):
+            output.update(self.tokenize_bos_eos(to_tokenize))
+        else:
+            output.update(self.tokenizer(*to_tokenize, padding=True, truncation='longest_first', return_tensors="pt", max_length=self.max_seq_length))
+        
         return output
 
+    def tokenize_bos_eos(self, to_tokenize):
+        out = self.tokenizer(*to_tokenize, 
+                            padding=False, 
+                            truncation='longest_first', 
+                            max_length=self.max_seq_length-2)
+        for seq, att in zip(out["input_ids"], out["attention_mask"]):
+            if seq[0] == self.bos_spec_token_d:
+                # Replace with a different doc token if given
+                if self.replace_bos:
+                    seq[0] = self.bos_spec_token_d_rep
+                seq.append(self.eos_spec_token_d)
+            elif seq[0] == self.bos_spec_token_q:
+                # Replace with a different query token if given
+                if self.replace_bos:
+                    seq[0] = self.bos_spec_token_q_rep
+                seq.append(self.eos_spec_token_q)
+            else:
+                raise ValueError(f"Did not find BOS Token in sequence: {self.tokenizer.decode(seq)}")
+            att.append(1)
+            #print(seq)
+            #print(att)
+            #print(self.tokenizer.decode(seq))
+        return self.tokenizer.pad(out, padding=True, return_tensors="pt")
 
     def get_config_dict(self):
         return {key: self.__dict__[key] for key in self.config_keys}
